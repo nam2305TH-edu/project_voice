@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>STT Upload & Record</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        input, button { font-size: 16px; margin-top: 10px; }
+        .result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; width: 500px; }
+        .label { font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>STT Upload & Record</h1>
+
+    <h3>Upload file</h3>
+    <input type="file" id="audioFile" accept=".wav,.mp3,.m4a">
+    <button type="button" onclick="uploadFile()">Upload & Convert</button>
+
+    <h3>Record from Microphone</h3>
+    <button type="button" id="recordBtn">Start Recording</button>
+    <span id="recordStatus"></span>
+
+    <h3>Real-time Streaming STT</h3>
+    <button type="button" id="streamBtn">Start Streaming</button>
+    <span id="streamStatus"></span>
+    <div class="result" id="streamResult" style="display:none;">
+        <p><span class="label">Streaming Text:</span></p>
+        <p id="streamText"></p>
+    </div>
+
+    <div class="result" id="result" style="display:none;">
+        <p><span class="label">File name:</span> <span id="filename"></span></p>
+        <p><span class="label">File size:</span> <span id="filesize"></span> bytes</p>
+        <p><span class="label">Duration:</span> <span id="duration"></span> s</p>
+        <p><span class="label">Language:</span> <span id="language"></span></p>
+        <p><span class="label">Text:</span></p>
+        <p id="text"></p>
+    </div>
+
+    <script>
+        async function uploadFile() {
+            const fileInput = document.getElementById("audioFile");
+            if (!fileInput.files.length) {
+                alert("Vui lòng chọn file audio!");
+                return;
+            }
+            const file = fileInput.files[0];
+            sendAudioToServer(file);
+        }
+        let mediaRecorder;
+        let audioChunks = [];
+
+        const recordBtn = document.getElementById("recordBtn");
+        const recordStatus = document.getElementById("recordStatus");
+
+        recordBtn.onclick = async () => {
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                mediaRecorder.stop();
+                recordBtn.innerText = "Start Recording";
+            } else {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+                    sendAudioToServer(audioBlob, "recorded_audio.wav");
+                    recordStatus.innerText = "";
+                };
+
+                mediaRecorder.start();
+                recordBtn.innerText = "Stop Recording";
+                recordStatus.innerText = "Recording...";
+            }
+        };
+
+        // Streaming STT
+        let ws;
+        let streamRecorder;
+        let audioStream;
+
+        const streamBtn = document.getElementById("streamBtn");
+        const streamStatus = document.getElementById("streamStatus");
+        const streamResult = document.getElementById("streamResult");
+        const streamText = document.getElementById("streamText");
+
+        streamBtn.onclick = async () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                if (streamRecorder && streamRecorder.state === "recording") {
+                    streamRecorder.stop();
+                }
+                ws.close();
+                streamBtn.innerText = "Start Streaming";
+                streamStatus.innerText = "";
+                streamResult.style.display = "none";
+            } else {
+                try {
+                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    ws = new WebSocket("ws://localhost:8000/ws/stt");
+
+                    ws.onopen = () => {
+                        streamRecorder = new MediaRecorder(audioStream);
+                        streamRecorder.ondataavailable = (event) => {
+                            if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+                                event.data.arrayBuffer().then(buffer => {
+                                    ws.send(new Uint8Array(buffer));
+                                });
+                            }
+                        };
+                        streamRecorder.start(200);
+                        streamBtn.innerText = "Stop Streaming";
+                        streamStatus.innerText = "Streaming...";
+                        streamResult.style.display = "block";
+                        streamText.innerText = "Đang nghe...";
+                    };
+
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        if (data.text) {
+                            streamText.innerText = data.text;
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        if (audioStream) {
+                            audioStream.getTracks().forEach(track => track.stop());
+                        }
+                    };
+
+                    ws.onerror = (error) => {
+                        streamStatus.innerText = "Lỗi kết nối WebSocket";
+                    };
+                } catch (err) {
+                    streamStatus.innerText = "Lỗi truy cập micro";
+                }
+            }
+        };
+
+        async function sendAudioToServer(file, filename=null) {
+            const formData = new FormData();
+            formData.append("file", file, filename || file.name);
+
+            const resultDiv = document.getElementById("result");
+            resultDiv.style.display = "block";
+            document.getElementById("text").innerText = "Đang xử lý...";
+
+            try {
+                const response = await fetch("http://127.0.0.1:8000/v1/stt", {
+                    method: "POST",
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (data.status === "success" || data.status === "queued") {
+                    document.getElementById("filename").innerText = data.filename || "-";
+                    document.getElementById("filesize").innerText = data.size_bytes ?? "-";
+                    document.getElementById("duration").innerText = data.duration ? data.duration.toFixed(2) : "-";
+                    document.getElementById("language").innerText = data.language || "unknown";
+                    document.getElementById("text").innerText = data.text || "Chờ xử lý...";
+                } else {
+                    document.getElementById("text").innerText = "Lỗi: " + (data.message || "File dài quá 30s ");
+                }
+            } catch (err) {
+                document.getElementById("text").innerText = "file dài quá";
+                console.error(err);
+            }
+        }
+    </script>
+</body>
+</html>
