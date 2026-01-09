@@ -1,13 +1,17 @@
 import uvicorn
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from app.main import app as main_app       
 from app.streaming_server import app as ws_app  
 from fastapi.middleware.cors import CORSMiddleware
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 app = FastAPI(title="Tme AI Agent - Unified Server")
 
-app.mount("/static", StaticFiles(directory="..", html=True), name="static")
+
+app.mount("/static", StaticFiles(directory=str(BASE_DIR), html=True), name="static")
 
 app.mount("/v1", main_app)      
 app.mount("/ws", ws_app)         

@@ -1,15 +1,16 @@
 import shutil
 import os
 import asyncio
-from faster_whisper import WhisperModel
 
+from faster_whisper import WhisperModel
 from pathlib import Path
+from langdetect import detect, LangDetectException
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from app.middleware import TimingMiddleware
 from app.config import USE_CELERY
 from app.tasks import transcribe_audio
-from pydub import AudioSegment   # <<< QUAN TRỌNG (ffmpeg)
+from pydub import AudioSegment   
 
 app = FastAPI(title="Tme AI Agent - Voice Engine")
 
@@ -17,8 +18,8 @@ TEMP_DIR = Path("temp_audio")
 TEMP_DIR.mkdir(exist_ok=True)
 
 if not USE_CELERY:
-    print("Loading Faster-Whisper Model (base, int8)...")
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    print("Loading Faster-Whisper Model (tiny, int8)...")
+    model = WhisperModel("tiny", device="cpu", compute_type="int8")  # tiny cho 8GB RAM
 
 app.add_middleware(TimingMiddleware)
 
@@ -87,10 +88,21 @@ async def speech_to_text(file: UploadFile = File(...)):
 
         text = " ".join([seg.text for seg in segments]).strip()
 
+        # Determine language: prefer model info, fallback to langdetect
+        language = "unknown"
+        if isinstance(info, dict) and info.get("language"):
+            language = info.get("language")
+        else:
+            try:
+                if text:
+                    language = detect(text)
+            except LangDetectException:
+                language = "unknown"
+
         return {
             "status": "success",
             "text": text,
-            "language": info.get("language", "unknown") if isinstance(info, dict) else "unknown",
+            "language": language,
             "filename": file.filename,
             "duration": duration,
             "size_bytes": file_size

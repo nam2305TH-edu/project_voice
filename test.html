@@ -22,11 +22,13 @@
     <span id="recordStatus"></span>
 
     <h3>Real-time Streaming STT</h3>
-    <button type="button" id="streamBtn">Start Streaming</button>
+    <button type="button" id="streamBtn">🎤 Start Streaming</button>
     <span id="streamStatus"></span>
     <div class="result" id="streamResult" style="display:none;">
-        <p><span class="label">Streaming Text:</span></p>
-        <p id="streamText"></p>
+        <p><span class="label">Đang nói (partial):</span></p>
+        <p id="partialText" style="color: #666; font-style: italic;"></p>
+        <p><span class="label">Full Text:</span></p>
+        <p id="streamText" style="font-size: 18px; color: #333;"></p>
     </div>
 
     <div class="result" id="result" style="display:none;">
@@ -79,125 +81,156 @@
         let ws;
         let streamRecorder;
         let audioStream;
+        let audioContext;
+        let processor;
 
         const streamBtn = document.getElementById("streamBtn");
         const streamStatus = document.getElementById("streamStatus");
         const streamResult = document.getElementById("streamResult");
         const streamText = document.getElementById("streamText");
+        const partialText = document.getElementById("partialText");
 
         streamBtn.onclick = async () => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                if (streamRecorder && streamRecorder.state === "recording") {
-                    streamRecorder.stop();
-                }
+                if (processor) processor.disconnect();
+                if (audioContext) audioContext.close();
+                if (audioStream) audioStream.getTracks().forEach(track => track.stop());
                 ws.close();
-                streamBtn.innerText = "Start Streaming";
+                
+                streamBtn.innerText = "🎤 Start Streaming";
                 streamStatus.innerText = "";
-                streamResult.style.display = "none";
-            } else {
-                try {
-                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    ws = new WebSocket("ws://localhost:8000/ws/stt");
+                return;
+            }
+            
+            try {
+                audioStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
+                
+                ws = new WebSocket("ws://localhost:8000/ws/stt");
 
-                    ws.onopen = () => {
-                        // Use WebAudio to capture, downsample to 16k, convert to PCM16 and send in fixed chunks
-                        const TARGET_RATE = 16000;
-                        const CHUNK_SEC = 0.5;
-                        const CHUNK_SAMPLES = TARGET_RATE * CHUNK_SEC; // 8000
+                ws.onopen = () => {
+                    const TARGET_RATE = 16000;
+                    const CHUNK_SEC = 0.05;  
+                    const CHUNK_SAMPLES = TARGET_RATE * CHUNK_SEC;
 
-                        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                        const source = audioCtx.createMediaStreamSource(audioStream);
-                        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+                    const source = audioContext.createMediaStreamSource(audioStream);
+                    processor = audioContext.createScriptProcessor(4096, 1, 1);
 
-                        let pending = new Float32Array(0);
+                    let pending = new Float32Array(0);
 
-                        function concatFloat32(a, b) {
-                            const c = new Float32Array(a.length + b.length);
-                            c.set(a, 0);
-                            c.set(b, a.length);
-                            return c;
-                        }
+                    function concatFloat32(a, b) {
+                        const c = new Float32Array(a.length + b.length);
+                        c.set(a, 0);
+                        c.set(b, a.length);
+                        return c;
+                    }
 
-                        function downsampleBuffer(buffer, sampleRate, outRate) {
-                            if (outRate === sampleRate) return buffer;
-                            const sampleRateRatio = sampleRate / outRate;
-                            const newLength = Math.round(buffer.length / sampleRateRatio);
-                            const result = new Float32Array(newLength);
-                            let offsetResult = 0;
-                            let offsetBuffer = 0;
-                            while (offsetResult < newLength) {
-                                const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-                                let accum = 0, count = 0;
-                                for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-                                    accum += buffer[i];
-                                    count++;
-                                }
-                                result[offsetResult] = count ? accum / count : 0;
-                                offsetResult++;
-                                offsetBuffer = nextOffsetBuffer;
+                    function downsampleBuffer(buffer, sampleRate, outRate) {
+                        if (outRate === sampleRate) return buffer;
+                        const sampleRateRatio = sampleRate / outRate;
+                        const newLength = Math.round(buffer.length / sampleRateRatio);
+                        const result = new Float32Array(newLength);
+                        let offsetResult = 0;
+                        let offsetBuffer = 0;
+                        while (offsetResult < newLength) {
+                            const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                            let accum = 0, count = 0;
+                            for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                                accum += buffer[i];
+                                count++;
                             }
-                            return result;
+                            result[offsetResult] = count ? accum / count : 0;
+                            offsetResult++;
+                            offsetBuffer = nextOffsetBuffer;
                         }
+                        return result;
+                    }
 
-                        function floatTo16BitPCM(float32Array) {
-                            const l = float32Array.length;
-                            const buffer = new ArrayBuffer(l * 2);
-                            const view = new DataView(buffer);
-                            let offset = 0;
-                            for (let i = 0; i < l; i++, offset += 2) {
-                                let s = Math.max(-1, Math.min(1, float32Array[i]));
-                                view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-                            }
-                            return buffer;
+                    function floatTo16BitPCM(float32Array) {
+                        const buffer = new ArrayBuffer(float32Array.length * 2);
+                        const view = new DataView(buffer);
+                        for (let i = 0; i < float32Array.length; i++) {
+                            let s = Math.max(-1, Math.min(1, float32Array[i]));
+                            view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
                         }
+                        return buffer;
+                    }
 
-                        processor.onaudioprocess = (e) => {
-                            if (ws.readyState !== WebSocket.OPEN) return;
-                            const input = e.inputBuffer.getChannelData(0);
-                            const down = downsampleBuffer(input, audioCtx.sampleRate, TARGET_RATE);
-                            pending = concatFloat32(pending, down);
+                    processor.onaudioprocess = (e) => {
+                        if (ws.readyState !== WebSocket.OPEN) return;
+                        const input = e.inputBuffer.getChannelData(0);
+                        const down = downsampleBuffer(input, audioContext.sampleRate, TARGET_RATE);
+                        pending = concatFloat32(pending, down);
 
-                            while (pending.length >= CHUNK_SAMPLES) {
-                                const chunk = pending.subarray(0, CHUNK_SAMPLES);
-                                pending = pending.subarray(CHUNK_SAMPLES);
-                                const int16buf = floatTo16BitPCM(chunk);
-                                ws.send(int16buf);
-                            }
-                        };
-
-                        // prevent audible output
-                        const zeroGain = audioCtx.createGain();
-                        zeroGain.gain.value = 0;
-
-                        source.connect(processor);
-                        processor.connect(zeroGain);
-                        zeroGain.connect(audioCtx.destination);
-
-                        streamBtn.innerText = "Stop Streaming";
-                        streamStatus.innerText = "Streaming...";
-                        streamResult.style.display = "block";
-                        streamText.innerText = "Đang nghe...";
-                    };
-
-                    ws.onmessage = (event) => {
-                        const data = JSON.parse(event.data);
-                        if (data.text) {
-                            streamText.innerText = data.text;
+                        while (pending.length >= CHUNK_SAMPLES) {
+                            const chunk = pending.subarray(0, CHUNK_SAMPLES);
+                            pending = pending.subarray(CHUNK_SAMPLES);
+                            const int16buf = floatTo16BitPCM(chunk);
+                            ws.send(int16buf);
                         }
                     };
 
-                    ws.onclose = () => {
-                        if (audioStream) {
-                            audioStream.getTracks().forEach(track => track.stop());
-                        }
-                    };
+                    const zeroGain = audioContext.createGain();
+                    zeroGain.gain.value = 0;
 
-                    ws.onerror = (error) => {
-                        streamStatus.innerText = "Lỗi kết nối WebSocket";
-                    };
-                } catch (err) {
-                    streamStatus.innerText = "Lỗi truy cập micro";
-                }
+                    source.connect(processor);
+                    processor.connect(zeroGain);
+                    zeroGain.connect(audioContext.destination);
+
+                    streamBtn.innerText = "Dừng";
+                    streamStatus.innerText = "~~";
+                    streamResult.style.display = "block";
+                    partialText.innerText = "";
+                    streamText.innerText = "";
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.status === "listening") {
+                        streamStatus.innerText = `Đang nghe... (${data.buffer_duration}s)`;
+                    } else if (data.partial) {
+                        
+                        partialText.innerText = "->" + data.partial;
+                    }
+                    
+                    if (data.text) {
+                        // Hiển thị full text tích lũy
+                        streamText.innerText = data.text;
+                        
+                        if (data.is_final) {
+                            partialText.innerText = "";
+                            streamStatus.innerText = "Đang nghe...";
+                        }
+                    }
+                    
+                    if (data.error) {
+                        streamStatus.innerText = "Lỗi: " + data.error;
+                    }
+                };
+
+                ws.onclose = () => {
+                    streamBtn.innerText = "🎤 Start Streaming";
+                    streamStatus.innerText = "Đã ngắt kết nối";
+                    if (audioStream) {
+                        audioStream.getTracks().forEach(track => track.stop());
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    streamStatus.innerText = "Lỗi kết nối WebSocket";
+                    console.error("WebSocket error:", error);
+                };
+            } catch (err) {
+                streamStatus.innerText = "Không thể truy cập microphone";
+                console.error("Mic error:", err);
             }
         };
 
