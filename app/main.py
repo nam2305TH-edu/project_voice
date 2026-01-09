@@ -1,7 +1,7 @@
 import shutil
 import os
 import asyncio
-import whisper
+from faster_whisper import WhisperModel
 
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
@@ -17,8 +17,8 @@ TEMP_DIR = Path("temp_audio")
 TEMP_DIR.mkdir(exist_ok=True)
 
 if not USE_CELERY:
-    print("Loading Whisper Model...")
-    model = whisper.load_model("base")
+    print("Loading Faster-Whisper Model (base, int8)...")
+    model = WhisperModel("base", device="cpu", compute_type="int8")
 
 app.add_middleware(TimingMiddleware)
 
@@ -77,18 +77,20 @@ async def speech_to_text(file: UploadFile = File(...)):
             timeout = 10
 
         # -------------------------
-        # 5. Whisper Transcribe
+        # 5. Transcribe with faster-whisper
         # -------------------------
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
+        segments, info = await loop.run_in_executor(
             None,
-            lambda: model.transcribe(str(wav_path))
+            lambda: model.transcribe(str(wav_path), beam_size=5)
         )
+
+        text = " ".join([seg.text for seg in segments]).strip()
 
         return {
             "status": "success",
-            "text": result["text"].strip(),
-            "language": result.get("language", "unknown"),
+            "text": text,
+            "language": info.get("language", "unknown") if isinstance(info, dict) else "unknown",
             "filename": file.filename,
             "duration": duration,
             "size_bytes": file_size

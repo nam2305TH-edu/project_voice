@@ -100,15 +100,79 @@
                     ws = new WebSocket("ws://localhost:8000/ws/stt");
 
                     ws.onopen = () => {
-                        streamRecorder = new MediaRecorder(audioStream);
-                        streamRecorder.ondataavailable = (event) => {
-                            if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-                                event.data.arrayBuffer().then(buffer => {
-                                    ws.send(new Uint8Array(buffer));
-                                });
+                        // Use WebAudio to capture, downsample to 16k, convert to PCM16 and send in fixed chunks
+                        const TARGET_RATE = 16000;
+                        const CHUNK_SEC = 0.5;
+                        const CHUNK_SAMPLES = TARGET_RATE * CHUNK_SEC; // 8000
+
+                        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                        const source = audioCtx.createMediaStreamSource(audioStream);
+                        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+                        let pending = new Float32Array(0);
+
+                        function concatFloat32(a, b) {
+                            const c = new Float32Array(a.length + b.length);
+                            c.set(a, 0);
+                            c.set(b, a.length);
+                            return c;
+                        }
+
+                        function downsampleBuffer(buffer, sampleRate, outRate) {
+                            if (outRate === sampleRate) return buffer;
+                            const sampleRateRatio = sampleRate / outRate;
+                            const newLength = Math.round(buffer.length / sampleRateRatio);
+                            const result = new Float32Array(newLength);
+                            let offsetResult = 0;
+                            let offsetBuffer = 0;
+                            while (offsetResult < newLength) {
+                                const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                                let accum = 0, count = 0;
+                                for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                                    accum += buffer[i];
+                                    count++;
+                                }
+                                result[offsetResult] = count ? accum / count : 0;
+                                offsetResult++;
+                                offsetBuffer = nextOffsetBuffer;
+                            }
+                            return result;
+                        }
+
+                        function floatTo16BitPCM(float32Array) {
+                            const l = float32Array.length;
+                            const buffer = new ArrayBuffer(l * 2);
+                            const view = new DataView(buffer);
+                            let offset = 0;
+                            for (let i = 0; i < l; i++, offset += 2) {
+                                let s = Math.max(-1, Math.min(1, float32Array[i]));
+                                view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                            }
+                            return buffer;
+                        }
+
+                        processor.onaudioprocess = (e) => {
+                            if (ws.readyState !== WebSocket.OPEN) return;
+                            const input = e.inputBuffer.getChannelData(0);
+                            const down = downsampleBuffer(input, audioCtx.sampleRate, TARGET_RATE);
+                            pending = concatFloat32(pending, down);
+
+                            while (pending.length >= CHUNK_SAMPLES) {
+                                const chunk = pending.subarray(0, CHUNK_SAMPLES);
+                                pending = pending.subarray(CHUNK_SAMPLES);
+                                const int16buf = floatTo16BitPCM(chunk);
+                                ws.send(int16buf);
                             }
                         };
-                        streamRecorder.start(200);
+
+                        // prevent audible output
+                        const zeroGain = audioCtx.createGain();
+                        zeroGain.gain.value = 0;
+
+                        source.connect(processor);
+                        processor.connect(zeroGain);
+                        zeroGain.connect(audioCtx.destination);
+
                         streamBtn.innerText = "Stop Streaming";
                         streamStatus.innerText = "Streaming...";
                         streamResult.style.display = "block";
