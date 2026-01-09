@@ -1,16 +1,14 @@
 import shutil
 import os
 import asyncio
-from pathlib import Path
+import whisper
 
+from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-
 from app.middleware import TimingMiddleware
 from app.config import USE_CELERY
 from app.tasks import transcribe_audio
-
-import whisper
 from pydub import AudioSegment   # <<< QUAN TRỌNG (ffmpeg)
 
 app = FastAPI(title="Tme AI Agent - Voice Engine")
